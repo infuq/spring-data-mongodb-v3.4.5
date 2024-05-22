@@ -17,6 +17,8 @@ import java.sql.ResultSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import static org.springframework.data.mongodb.core.query.SerializationUtils.serializeToJsonSafely;
 
@@ -60,7 +62,7 @@ public class ToMySQLUtil {
         System.out.println(serializeToJsonSafely(queryObject));
 
         // #1
-        String andCondition = andCondition(queryObject, entityClass, fieldMap);
+        String andCondition = andCondition(queryObject, entityClass, fieldMap, " ");
         buf.append(andCondition);
 
         if (query.isSorted()) {
@@ -159,38 +161,91 @@ public class ToMySQLUtil {
     }
 
     // AND ... AND .. IN (...) AND .. >= . AND ...
-    private static <T> String andCondition(Document document, Class<T> entityClass, Map<String, Field> fieldMap) {
+    private static <T> String andCondition(Document document, Class<T> entityClass, Map<String, Field> fieldMap, String prefixAnd) {
         StringBuilder buf = new StringBuilder();
+
+        int size = document.size();
+        int i = 0;
         for (Map.Entry<String, Object> pair : document.entrySet()) {
-            String fieldName = pair.getKey();
-            if (fieldName.startsWith("$")) {
-                if (fieldName.equals("$in")) {
-                    buf.append(" IN ");
-                } else if (fieldName.equals("$gte")) {
-                    buf.append(" >= ");
-                } else {
-                    buf.append(findColumnName(fieldName, entityClass, fieldMap));
-                }
-            } else {
-                buf.append(" AND " + findColumnName(fieldName, entityClass, fieldMap));
+            if (i > 0) {
+                buf.append(prefixAnd);
             }
 
+            // 处理Key
+            String fieldNameKey = pair.getKey();
+            String t;
+
+            if (fieldNameKey.startsWith("$")) {
+                if (fieldNameKey.equals("$in")) {
+                    t = " IN ";
+                    buf.append(t);
+                } else if (fieldNameKey.equals("$nin")) {
+                    t = " NOT IN ";
+                    buf.append(t);
+                } else if (fieldNameKey.equals("$gte")) {
+                    t = " >= ";
+                    buf.append(t);
+                } else if (fieldNameKey.equals("$gt")) {
+                    t = " > ";
+                    buf.append(t);
+                } else if (fieldNameKey.equals("$lte")) {
+                    t = " <= ";
+                    buf.append(t);
+                } else if (fieldNameKey.equals("$lt")) {
+                    t = " < ";
+                    buf.append(t);
+                } else {
+                    t = " " + findColumnName(fieldNameKey, entityClass, fieldMap);
+                    buf.append(t);
+                }
+            } else {
+                t = " AND " + findColumnName(fieldNameKey, entityClass, fieldMap);
+                buf.append(t);
+            }
+
+
+            // 处理value
             Object fieldValue = pair.getValue();
-            if (fieldValue instanceof String) {// AND address LIKE '%...%'
-                buf.append(" LIKE \"%" + fieldValue + "%\"");
-            } else if (fieldValue instanceof Integer) {// AND year = 2024
-                buf.append(" " + fieldValue);
-            } else if (fieldValue instanceof List) {// AND color IN (...)
+            if (fieldValue instanceof String) {                     // 字符类型
+                if (fieldNameKey.startsWith("$")) {
+                    buf.append(" '" + fieldValue + "' ");
+                } else {
+                    buf.append(" = '" + fieldValue + "' ");
+                }
+            } else if (fieldValue instanceof Integer) {             // 数值类型
+                if (fieldNameKey.startsWith("$")) {
+                    buf.append(" " + fieldValue);
+                } else {
+                    buf.append(" = " + fieldValue);
+                }
+            } else if (fieldValue instanceof List) {                // 集合
                 String _fieldValue = JSON.toJSONString(fieldValue);
                 List<Object> vList = JSON.parseArray(_fieldValue, Object.class);
 
                 String inCondition = inCondition(vList);
                 buf.append(inCondition);
+            } else if (fieldValue instanceof Pattern) {
+                Pattern pattern = (Pattern) fieldValue;
+                String regexp = pattern.pattern();
+                // 如果已经指定了正则表达式则直接使用它
+                if (regexp.contains("[*?]")) {
+                    buf.append(" REGEXP '" + pattern.pattern() + "' ");
+                } else {
+                    buf.append(" REGEXP '.*" + pattern.pattern() + ".*' ");
+                }
             } else if (fieldValue instanceof Document) {
-                // 递归
-                String v = andCondition((Document) fieldValue, entityClass, fieldMap);
-                buf.append(" " + v);
+                if (((Document) fieldValue).size() > 1) {
+                    // 递归
+                    String v = andCondition((Document) fieldValue, entityClass, fieldMap, t);
+                    buf.append(" " + v);
+                } else {
+                    // 递归
+                    String v = andCondition((Document) fieldValue, entityClass, fieldMap, " ");
+                    buf.append(" " + v);
+                }
             }
+
+            i = i + 1;
         }
         return buf.toString();
     }
