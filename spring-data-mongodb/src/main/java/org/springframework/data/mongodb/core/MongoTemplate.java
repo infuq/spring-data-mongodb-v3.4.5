@@ -18,6 +18,7 @@ package org.springframework.data.mongodb.core;
 import static org.springframework.data.mongodb.core.query.SerializationUtils.*;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.*;
@@ -25,7 +26,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiPredicate;
 import java.util.stream.Collectors;
 
-import com.alibaba.fastjson.JSON;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.bson.Document;
@@ -55,6 +55,7 @@ import org.springframework.data.mapping.context.MappingContext;
 import org.springframework.data.mongodb.MongoDatabaseFactory;
 import org.springframework.data.mongodb.MongoDatabaseUtils;
 import org.springframework.data.mongodb.SessionSynchronization;
+import org.springframework.data.mongodb.annotation.ToMySQL;
 import org.springframework.data.mongodb.core.BulkOperations.BulkMode;
 import org.springframework.data.mongodb.core.DefaultBulkOperations.BulkOperationContext;
 import org.springframework.data.mongodb.core.EntityOperations.AdaptibleEntity;
@@ -186,6 +187,8 @@ public class MongoTemplate implements MongoOperations, ApplicationContextAware, 
 	private @Nullable EntityCallbacks entityCallbacks;
 	private @Nullable ResourceLoader resourceLoader;
 	private @Nullable MongoPersistentEntityIndexCreator indexCreator;
+
+	private ApplicationContext applicationContext;
 
 	private SessionSynchronization sessionSynchronization = SessionSynchronization.ON_ACTUAL_TRANSACTION;
 
@@ -331,6 +334,8 @@ public class MongoTemplate implements MongoOperations, ApplicationContextAware, 
 		}
 
 		resourceLoader = applicationContext;
+
+		this.applicationContext = applicationContext;
 	}
 
 	/**
@@ -900,128 +905,28 @@ public class MongoTemplate implements MongoOperations, ApplicationContextAware, 
 		Assert.notNull(collectionName, "CollectionName must not be null!");
 		Assert.notNull(entityClass, "EntityClass must not be null!");
 
-		toMySQL(collectionName, entityClass, query);
+		// 表明查询需要转向MySQL
+		if (entityClass.getAnnotation(ToMySQL.class) != null) {
+			// #1
+			Map<String, Field> fieldMap = ToMySQLUtil.buildFieldMap(entityClass);
+
+			// #2
+			String sql = ToMySQLUtil.createSQL(collectionName, query, entityClass, fieldMap);
+			System.out.println("SQL语句: " + sql);
+
+			// #3
+			ToMySQLUtil.executeQuery(applicationContext, sql);
+
+
+		}
+
 
 		return doFind(collectionName, query.getQueryObject(), query.getFieldsObject(), entityClass,
 				new QueryCursorPreparer(query, entityClass));
 	}
 
 
-	private void toMySQL(String collectionName, Class entityClass, Query query) {
 
-		StringBuilder buf = new StringBuilder();
-		buf.append("SELECT * FROM ");
-
-		// 表名
-		String table = collectionName;
-		buf.append(table);
-		buf.append(" WHERE 1=1 ");
-
-
-		Document queryObject = query.getQueryObject();
-		System.out.println(serializeToJsonSafely(queryObject));
-
-		// #1
-		String andCondition = this.andCondition(queryObject);
-		buf.append(andCondition);
-
-		if (query.isSorted()) {
-			Document sortObject = query.getSortObject();
-			System.out.println(serializeToJsonSafely(sortObject));
-
-			// #2
-			String orderByCondition = this.orderByCondition(sortObject);
-			buf.append(" ORDER BY " + orderByCondition);
-		}
-
-		long skip = query.getSkip();
-		int limit = query.getLimit();
-		if (limit > 0) {
-			buf.append(" LIMIT " + skip + "," + limit);
-		} else {
-			buf.append(" LIMIT " + skip);
-		}
-
-		System.out.println(buf);
-
-	}
-
-
-	// ORDER BY ...
-	private String orderByCondition(Document document) {
-		StringBuilder buf = new StringBuilder();
-		for (Map.Entry<String, Object> pair : document.entrySet()) {
-			String fieldName = pair.getKey();
-			Object fieldValue = pair.getValue();
-			Integer _fieldValue = (Integer) fieldValue;
-
-			buf.append(" " + fieldName + (_fieldValue < 0 ? " DESC ," : " ASC ,"));
-		}
-
-		return buf.substring(0, buf.toString().length() - 1);
-	}
-
-
-	// AND ... AND .. IN (...) AND .. >= . AND ...
-	private String andCondition(Document document) {
-		StringBuilder buf = new StringBuilder();
-		for (Map.Entry<String, Object> pair : document.entrySet()) {
-			String fieldName = pair.getKey();
-			if (fieldName.startsWith("$")) {
-				if (fieldName.equals("$in")) {
-					buf.append(" IN ");
-				} else if (fieldName.equals("$gte")) {
-					buf.append(" >= ");
-				} else {
-					buf.append(fieldName);
-				}
-			} else {
-				buf.append(" AND " + fieldName);
-			}
-
-			Object fieldValue = pair.getValue();
-			if (fieldValue instanceof String) {// AND address LIKE '%...%'
-				buf.append(" LIKE \"%" + fieldValue + "%\"");
-			} else if (fieldValue instanceof Integer) {// AND year = 2024
-				buf.append(" " + fieldValue);
-			} else if (fieldValue instanceof List) {// AND color IN (...)
-				String _fieldValue = JSON.toJSONString(fieldValue);
-				List<Object> vList = JSON.parseArray(_fieldValue, Object.class);
-
-				String inCondition = inCondition(vList);
-				buf.append(inCondition);
-			} else if (fieldValue instanceof Document) {
-				// 递归
-				String v = andCondition((Document) fieldValue);
-				buf.append(" " + v);
-			}
-		}
-		return buf.toString();
-	}
-
-	/**
-	 * 把集合转成小括号格式
-	 * 例如 ["A","B","C"] 转成 ("A","B","C”)
-	 */
-	private String inCondition(List<Object> vList) {
-
-		StringBuilder inBuf = new StringBuilder();
-		inBuf.append(" (");
-		for (int i = 0; i < vList.size(); i++) {
-			Object v = vList.get(i);
-			if (v instanceof String) {
-				inBuf.append("\"" + v + "\"");
-			} else {
-				inBuf.append(v);
-			}
-			if (i != vList.size() - 1) {
-				inBuf.append(",");
-			}
-		}
-		inBuf.append(") ");
-
-		return inBuf.toString();
-	}
 
 
 	@Nullable
