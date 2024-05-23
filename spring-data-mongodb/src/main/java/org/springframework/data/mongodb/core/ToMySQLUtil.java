@@ -3,6 +3,7 @@ package org.springframework.data.mongodb.core;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.fastjson.JSON;
 import com.google.common.base.CaseFormat;
+import com.sun.org.apache.xpath.internal.operations.Bool;
 import org.bson.Document;
 import org.springframework.context.ApplicationContext;
 import org.springframework.data.mongodb.annotation.ToMySQL;
@@ -170,11 +171,14 @@ public class ToMySQLUtil {
             if (i > 0) {
                 buf.append(prefixAnd);
             }
+            i = i + 1;
 
-            // 处理Key
+
             String fieldNameKey = pair.getKey();
+            Object fieldValue = pair.getValue();
             String t;
 
+            // 处理Key
             if (fieldNameKey.startsWith("$")) {
                 if (fieldNameKey.equals("$in")) {
                     t = " IN ";
@@ -194,6 +198,25 @@ public class ToMySQLUtil {
                 } else if (fieldNameKey.equals("$lt")) {
                     t = " < ";
                     buf.append(t);
+                } else if (fieldNameKey.equals("$ne")) {
+                    if (fieldValue == null) {
+                        t = " IS NOT NULL ";
+                        buf.append(t);
+                        continue;
+                    } else {
+                        t = " != ";
+                        buf.append(t);
+                    }
+                } else if (fieldNameKey.equals("$exists")) {
+                    if ((Boolean) fieldValue) { // 存在
+                        t = " IS NOT NULL ";
+                        buf.append(t);
+                        continue;
+                    } else { // 不存在
+                        t = " IS NULL ";
+                        buf.append(t);
+                        continue;
+                    }
                 } else {
                     t = " " + findColumnName(fieldNameKey, entityClass, fieldMap);
                     buf.append(t);
@@ -203,9 +226,12 @@ public class ToMySQLUtil {
                 buf.append(t);
             }
 
+            if (fieldValue == null) {
+                buf.append(" IS NULL ");
+                continue;
+            }
 
             // 处理value
-            Object fieldValue = pair.getValue();
             if (fieldValue instanceof String) {                     // 字符类型
                 if (fieldNameKey.startsWith("$")) {
                     buf.append(" '" + fieldValue + "' ");
@@ -228,7 +254,7 @@ public class ToMySQLUtil {
                 Pattern pattern = (Pattern) fieldValue;
                 String regexp = pattern.pattern();
                 // 如果已经指定了正则表达式则直接使用它
-                if (regexp.contains("[*?]")) {
+                if (regexp.contains("*") || regexp.contains("?") || regexp.contains(".")) {
                     buf.append(" REGEXP '" + pattern.pattern() + "' ");
                 } else {
                     buf.append(" REGEXP '.*" + pattern.pattern() + ".*' ");
@@ -245,7 +271,7 @@ public class ToMySQLUtil {
                 }
             }
 
-            i = i + 1;
+
         }
         return buf.toString();
     }
