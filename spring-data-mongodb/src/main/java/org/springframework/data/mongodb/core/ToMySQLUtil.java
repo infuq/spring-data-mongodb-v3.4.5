@@ -1,6 +1,7 @@
 package org.springframework.data.mongodb.core;
 
 import com.alibaba.druid.pool.DruidDataSource;
+import com.alibaba.druid.util.StringUtils;
 import com.alibaba.fastjson.JSON;
 import com.google.common.base.CaseFormat;
 import org.bson.Document;
@@ -8,7 +9,6 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.data.mongodb.annotation.ToMySQL;
 import org.springframework.data.mongodb.annotation.ToMySQLTableColumn;
 import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.util.Assert;
 
 import java.lang.reflect.Field;
 import java.sql.Connection;
@@ -28,39 +28,35 @@ public class ToMySQLUtil {
 
     // 构造属性与Field的对应关系
     public static <T> FieldMapObject buildFieldMap(Class<T> entityClass) {
-        Field[] fields = entityClass.getDeclaredFields();
 
         FieldMapObject fieldMapObject = new FieldMapObject();
 
-        Map<String/*属性名*/, Field> fieldMap = new HashMap<>();
-        Map<String/*字段名*/, Field> columnMap = new HashMap<>();
-        Map<String/*属性名*/, String/*字段名*/> fieldColumnMap = new HashMap<>();
-        Map<String/*字段名*/, String/*属性名*/> columnFieldMap = new HashMap<>();
+        Map<String/*属性名*/, Field> fieldMap = fieldMapObject.getFieldMap();
+        Map<String/*字段名*/, Field> columnMap = fieldMapObject.getColumnMap();
+        Map<String/*属性名*/, String/*字段名*/> fieldColumnMap = fieldMapObject.getFieldColumnMap();
+        Map<String/*字段名*/, String/*属性名*/> columnFieldMap = fieldMapObject.getColumnFieldMap();
 
-        fieldMapObject.setFieldMap(fieldMap);
-        fieldMapObject.setColumnMap(columnMap);
-        fieldMapObject.setFieldColumnMap(fieldColumnMap);
-        fieldMapObject.setColumnFieldMap(columnFieldMap);
+        Field[] fields = entityClass.getDeclaredFields();
+        for (Field field : fields) {
+            // 属性名
+            // 例如 fieldName = createTime
+            String fieldName = field.getName();
+            fieldMap.put(fieldName, field);
 
-        for (Field f : fields) {
-            // 例如 propertyName = createTime
-            String fieldName = f.getName();
-            fieldMap.put(fieldName, f);
-
-            String columnName;
-            ToMySQLTableColumn fieldAnnotation = f.getAnnotation(ToMySQLTableColumn.class);
-            if (fieldAnnotation != null) {
+            // 字段名
+            String columnName = null;
+            ToMySQLTableColumn fieldAnnotation = field.getAnnotation(ToMySQLTableColumn.class);
+            if (fieldAnnotation != null && !StringUtils.isEmpty(fieldAnnotation.value())) {
                 // 字段名称 例如 create_time
                 columnName = fieldAnnotation.value();
-                // 注解ToMySQLTableField必须有value值
-                Assert.isTrue(columnName != null && !columnName.isEmpty(), entityClass.getName() + "的属性" + fieldName + "上的注解ToMySQLTableField没有value值.");
-
                 columnName = columnName.replaceAll("`", "");
+                columnMap.put(columnName, field);
+            }
 
-                columnMap.put(columnName, f);
-            } else {
+            if (StringUtils.isEmpty(columnName)) {
+                // 例如 将 createTime 转成 create_time
                 columnName = CaseFormat.LOWER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, fieldName);
-                columnMap.put(columnName, f);
+                columnMap.put(columnName, field);
             }
 
             fieldColumnMap.put(fieldName, columnName);
@@ -71,8 +67,8 @@ public class ToMySQLUtil {
         return fieldMapObject;
     }
 
-    // 生成SQL语句
-    public static <T> String createSQL(String collectionName, Query query, Class<T> entityClass, FieldMapObject fieldMapObject) {
+    // 生成查询SQL语句
+    public static <T> String createQuerySQL(String collectionName, Query query, Class<T> entityClass, FieldMapObject fieldMapObject) {
 
         StringBuilder buf = new StringBuilder();
         buf.append("SELECT * FROM ");
@@ -87,7 +83,7 @@ public class ToMySQLUtil {
         System.out.println(serializeToJsonSafely(queryObject));
 
         // #1
-        String andCondition = andCondition(queryObject, entityClass, fieldMapObject, " ");
+        String andCondition = andCondition(queryObject, entityClass, fieldMapObject, " ", " ");
         buf.append(andCondition);
 
         if (query.isSorted()) {
@@ -99,6 +95,7 @@ public class ToMySQLUtil {
             buf.append(" ORDER BY " + orderByCondition);
         }
 
+        // #3
         long skip = query.getSkip();
         int limit = query.getLimit();
         if (limit > 0) {
@@ -121,14 +118,15 @@ public class ToMySQLUtil {
         if (entityClassAnnotation != null) {
             // 表
             String table = entityClassAnnotation.table();
-            if (table != null && !table.isEmpty()) {
+            if (!StringUtils.isEmpty(table)) {
                 table = table.replaceAll("`", "");
                 // `t_order`
                 tableName = "`" + table + "`";
             }
             // 库
             String database = entityClassAnnotation.database();
-            if (database != null && !database.isEmpty()) {
+            if (!StringUtils.isEmpty(database)) {
+                database = database.replaceAll("`", "");
                 // `database`.`t_order`
                 tableName = "`" + database + "`." + tableName;
             }
@@ -142,9 +140,11 @@ public class ToMySQLUtil {
         Map<String, String> fieldColumnMap = fieldMapObject.getFieldColumnMap();
         String columnName = fieldColumnMap.get(fieldName);
 
-        if (columnName == null || columnName.isEmpty()) {
+        if (StringUtils.isEmpty(columnName)) {
             columnName = CaseFormat.LOWER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, fieldName);
-            fieldColumnMap.put(fieldName, columnName);
+            if (!columnName.contains("$")) {
+                fieldColumnMap.put(fieldName, columnName);
+            }
         }
 
         return columnName;
@@ -156,33 +156,38 @@ public class ToMySQLUtil {
         for (Map.Entry<String, Object> pair : document.entrySet()) {
             String fieldNameKey = pair.getKey();
 
-            // 例如 areaCode,createTime
+            // 例如 fieldNameKey = 'areaCode,createTime'
             String[] fieldNameArr = fieldNameKey.split(",");
             StringBuilder orderBuf = new StringBuilder();
-            for (String fieldName : fieldNameArr) {
+
+            for (int i = 0; i < fieldNameArr.length; i++) {
+                String fieldName = fieldNameArr[i];
                 orderBuf.append(findColumnName(fieldName, entityClass, fieldMap));
-                orderBuf.append(",");
+                if (i < (fieldNameArr.length - 1)) {
+                    orderBuf.append(",");
+                }
             }
-            String fieldName = orderBuf.substring(0, orderBuf.toString().length() - 1);
 
+            Integer fieldValue = (Integer) pair.getValue();
 
-            Object fieldValue = pair.getValue();
-            Integer _fieldValue = (Integer) fieldValue;
-
-            buf.append(" " + fieldName + (_fieldValue < 0 ? " DESC ," : " ASC ,"));
+            buf.append(" " + orderBuf + (fieldValue < 0 ? " DESC ," : " ASC ,"));
         }
 
         return buf.substring(0, buf.toString().length() - 1);
     }
 
     // AND ... AND .. IN (...) AND .. >= . AND ...
-    private static <T> String andCondition(Document document, Class<T> entityClass, FieldMapObject fieldMapObject, String prefixAnd) {
+    private static <T> String andCondition(Document document, Class<T> entityClass, FieldMapObject fieldMapObject, String prefixColumnName, String prefixAnd) {
         StringBuilder buf = new StringBuilder();
 
         int size = document.size();
         int i = 0;
         for (Map.Entry<String, Object> pair : document.entrySet()) {
+
+            // 循环过程第一次不会添加 prefixAnd
+            // 该情况常用在 create_time <= '2024-05-23' AND create_time > '2021-07-24'
             if (i > 0) {
+                // 例如 prefixAnd = 'AND create_time'
                 buf.append(prefixAnd);
             }
             i = i + 1;
@@ -216,7 +221,7 @@ public class ToMySQLUtil {
                     buf.append(t);
                 } else if (fieldNameKey.equals("$ne")) {
                     if (fieldValue == null) {
-                        t = " IS NOT NULL ";
+                        t = " IS NOT NULL )";
                         buf.append(t);
                         continue;
                     } else {
@@ -228,11 +233,11 @@ public class ToMySQLUtil {
                     continue;
                     /*
                     if ((Boolean) fieldValue) { // 存在
-                        t = " IS NOT NULL ";
+                        t = " IS NOT NULL )";
                         buf.append(t);
                         continue;
                     } else { // 不存在
-                        t = " IS NULL ";
+                        t = " IS NULL )";
                         buf.append(t);
                         continue;
                     }
@@ -247,25 +252,24 @@ public class ToMySQLUtil {
                     buf.append(t);
                     continue;
                 } else {
-                    t = " AND " + columnName;
+                    t = " AND ( " + columnName;
                     buf.append(t);
                 }
             }
 
 
-
             // 处理value
             if (fieldValue instanceof String) {                     // 字符类型
                 if (fieldNameKey.startsWith("$")) {
-                    buf.append(" '" + fieldValue + "' ");
+                    buf.append(" '" + fieldValue + "' ) ");
                 } else {
-                    buf.append(" = '" + fieldValue + "' ");
+                    buf.append(" = '" + fieldValue + "' ) ");
                 }
             } else if (fieldValue instanceof Integer) {             // 数值类型
                 if (fieldNameKey.startsWith("$")) {
-                    buf.append(" " + fieldValue);
+                    buf.append(" " + fieldValue + " )");
                 } else {
-                    buf.append(" = " + fieldValue);
+                    buf.append(" = " + fieldValue + " )");
                 }
             } else if (fieldValue instanceof List) {                // 集合
                 String _fieldValue = JSON.toJSONString(fieldValue);
@@ -278,18 +282,18 @@ public class ToMySQLUtil {
                 String regexp = pattern.pattern();
                 // 如果已经指定了正则表达式则直接使用它
                 if (regexp.contains("*") || regexp.contains("?") || regexp.contains(".")) {
-                    buf.append(" REGEXP '" + pattern.pattern() + "' ");
+                    buf.append(" REGEXP '" + pattern.pattern() + "' )");
                 } else {
-                    buf.append(" REGEXP '.*" + pattern.pattern() + ".*' ");
+                    buf.append(" REGEXP '.*" + pattern.pattern() + ".*' )");
                 }
             } else if (fieldValue instanceof Document) {
                 if (((Document) fieldValue).size() > 1) {
                     // 递归
-                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, t);
+                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, columnName, t);
                     buf.append(" " + v);
                 } else {
                     // 递归
-                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, " ");
+                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, columnName, " ");
                     buf.append(" " + v);
                 }
             }
@@ -314,11 +318,11 @@ public class ToMySQLUtil {
             } else {
                 inBuf.append(v);
             }
-            if (i != vList.size() - 1) {
+            if (i < (vList.size() - 1)) {
                 inBuf.append(",");
             }
         }
-        inBuf.append(") ");
+        inBuf.append(") ) ");
 
         return inBuf.toString();
     }
@@ -352,7 +356,13 @@ public class ToMySQLUtil {
                     Field field = columnMap.get(columnName);
                     if (field != null) {
                         field.setAccessible(true);
-                        field.set(object, columnValue);
+
+                        Class<?> type = field.getType();
+                        if (type == String.class && columnValue instanceof Number) {
+                            field.set(object, columnValue.toString());
+                        } else {
+                            field.set(object, columnValue);
+                        }
                     }
                 }
                 dList.add(object);
@@ -400,33 +410,18 @@ public class ToMySQLUtil {
             return fieldMap;
         }
 
-        public void setFieldMap(Map<String, Field> fieldMap) {
-            this.fieldMap = fieldMap;
-        }
-
         public Map<String, Field> getColumnMap() {
             return columnMap;
-        }
-
-        public void setColumnMap(Map<String, Field> columnMap) {
-            this.columnMap = columnMap;
         }
 
         public Map<String, String> getFieldColumnMap() {
             return fieldColumnMap;
         }
 
-        public void setFieldColumnMap(Map<String, String> fieldColumnMap) {
-            this.fieldColumnMap = fieldColumnMap;
-        }
-
         public Map<String, String> getColumnFieldMap() {
             return columnFieldMap;
         }
 
-        public void setColumnFieldMap(Map<String, String> columnFieldMap) {
-            this.columnFieldMap = columnFieldMap;
-        }
     }
 
 }

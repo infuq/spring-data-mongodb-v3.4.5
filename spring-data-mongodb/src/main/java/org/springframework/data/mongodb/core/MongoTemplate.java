@@ -866,7 +866,7 @@ public class MongoTemplate implements MongoOperations, ApplicationContextAware, 
 			ToMySQLUtil.FieldMapObject fieldMapObject = ToMySQLUtil.buildFieldMap(entityClass);
 
 			// #2
-			String sql = ToMySQLUtil.createSQL(collectionName, query, entityClass, fieldMapObject);
+			String sql = ToMySQLUtil.createQuerySQL(collectionName, query, entityClass, fieldMapObject);
 			System.out.println("SQL语句: " + sql);
 
 			// #3
