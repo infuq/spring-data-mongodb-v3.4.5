@@ -3,7 +3,6 @@ package org.springframework.data.mongodb.core;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.fastjson.JSON;
 import com.google.common.base.CaseFormat;
-import com.sun.org.apache.xpath.internal.operations.Bool;
 import org.bson.Document;
 import org.springframework.context.ApplicationContext;
 import org.springframework.data.mongodb.annotation.ToMySQL;
@@ -15,10 +14,11 @@ import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Pattern;
 
 import static org.springframework.data.mongodb.core.query.SerializationUtils.serializeToJsonSafely;
@@ -27,28 +27,47 @@ public class ToMySQLUtil {
 
 
     // 构造属性与Field的对应关系
-    public static <T> Map<String, Field> buildFieldMap(Class<T> entityClass) {
+    public static <T> FieldMap buildFieldMap(Class<T> entityClass) {
         Field[] fields = entityClass.getDeclaredFields();
 
-        Map<String, Field> tMap = new HashMap<>();
+        FieldMap fieldMapObject = new FieldMap();
+
+        Map<String/*属性名*/, Field> fieldMap = new HashMap<>();
+        Map<String/*字段名*/, Field> columnMap = new HashMap<>();
+        Map<String/*属性名*/, String/*字段名*/> fieldColumnMap = new HashMap<>();
+        Map<String/*字段名*/, String/*属性名*/> columnFieldMap = new HashMap<>();
+
         for (Field f : fields) {
             // 例如 propertyName = createTime
-            String propertyName = f.getName();
-            tMap.put(propertyName, f);
+            String fieldName = f.getName();
+            fieldMap.put(fieldName, f);
 
+            String columnName;
             ToMySQLTableColumn fieldAnnotation = f.getAnnotation(ToMySQLTableColumn.class);
             if (fieldAnnotation != null) {
                 // 字段名称 例如 create_time
-                String fieldName = fieldAnnotation.value();
-                tMap.put(fieldName, f);
+                columnName = fieldAnnotation.value();
+                // 注解ToMySQLTableField必须有value值
+                Assert.isTrue(columnName != null && !columnName.isEmpty(), entityClass.getName() + "的属性" + fieldName + "上的注解ToMySQLTableField没有value值.");
+
+                columnName = columnName.replaceAll("`", "");
+
+                columnMap.put(columnName, f);
+            } else {
+                columnName = CaseFormat.LOWER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, fieldName);
+                columnMap.put(columnName, f);
             }
+
+            fieldColumnMap.put(fieldName, columnName);
+            columnFieldMap.put(columnName, fieldName);
         }
 
-        return tMap;
+
+        return fieldMapObject;
     }
 
     // 生成SQL语句
-    public static <T> String createSQL(String collectionName, Query query, Class<T> entityClass, Map<String, Field> fieldMap) {
+    public static <T> String createSQL(String collectionName, Query query, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject) {
 
         StringBuilder buf = new StringBuilder();
         buf.append("SELECT * FROM ");
@@ -63,7 +82,7 @@ public class ToMySQLUtil {
         System.out.println(serializeToJsonSafely(queryObject));
 
         // #1
-        String andCondition = andCondition(queryObject, entityClass, fieldMap, " ");
+        String andCondition = andCondition(queryObject, entityClass, fieldMapObject, " ");
         buf.append(andCondition);
 
         if (query.isSorted()) {
@@ -71,7 +90,7 @@ public class ToMySQLUtil {
             System.out.println(serializeToJsonSafely(sortObject));
 
             // #2
-            String orderByCondition = orderByCondition(sortObject, entityClass, fieldMap);
+            String orderByCondition = orderByCondition(sortObject, entityClass, fieldMapObject);
             buf.append(" ORDER BY " + orderByCondition);
         }
 
@@ -114,30 +133,13 @@ public class ToMySQLUtil {
     }
 
     // 数据库列名
-    // 查找顺序: 实体类属性上的ToMySQLTableField注解 -> 实体类属性
-    private static <T> String findColumnName(String fieldName, Class<T> entityClass, Map<String, Field> fieldMap) {
-
-        String newFieldName = "`" + CaseFormat.LOWER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, fieldName) + "`";
-
-        Field field = fieldMap.get(fieldName);
-        if (field != null) {
-            ToMySQLTableColumn fieldAnnotation = field.getAnnotation(ToMySQLTableColumn.class);
-            if (fieldAnnotation != null) {
-                // 字段名称
-                String _fieldName = fieldAnnotation.value();
-                // 注解ToMySQLTableField必须有value值
-                Assert.isTrue(_fieldName != null && !_fieldName.isEmpty(), entityClass.getName() + "的属性" + field + "上的注解ToMySQLTableField没有value值.");
-
-                _fieldName = _fieldName.replaceAll("`", "");
-                newFieldName = "`" + _fieldName + "`";
-            }
-        }
-
-        return newFieldName;
+    private static <T> String findColumnName(String fieldName, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject) {
+        Map<String, String> fieldColumnMap = fieldMapObject.getFieldColumnMap();
+        return fieldColumnMap.get(fieldName);
     }
 
     // ORDER BY ...
-    private static <T> String orderByCondition(Document document, Class<T> entityClass, Map<String, Field> fieldMap) {
+    private static <T> String orderByCondition(Document document, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMap) {
         StringBuilder buf = new StringBuilder();
         for (Map.Entry<String, Object> pair : document.entrySet()) {
             String fieldNameKey = pair.getKey();
@@ -162,7 +164,7 @@ public class ToMySQLUtil {
     }
 
     // AND ... AND .. IN (...) AND .. >= . AND ...
-    private static <T> String andCondition(Document document, Class<T> entityClass, Map<String, Field> fieldMap, String prefixAnd) {
+    private static <T> String andCondition(Document document, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject, String prefixAnd) {
         StringBuilder buf = new StringBuilder();
 
         int size = document.size();
@@ -218,11 +220,11 @@ public class ToMySQLUtil {
                         continue;
                     }
                 } else {
-                    t = " " + findColumnName(fieldNameKey, entityClass, fieldMap);
+                    t = " " + findColumnName(fieldNameKey, entityClass, fieldMapObject);
                     buf.append(t);
                 }
             } else {
-                t = " AND " + findColumnName(fieldNameKey, entityClass, fieldMap);
+                t = " AND " + findColumnName(fieldNameKey, entityClass, fieldMapObject);
                 buf.append(t);
             }
 
@@ -262,11 +264,11 @@ public class ToMySQLUtil {
             } else if (fieldValue instanceof Document) {
                 if (((Document) fieldValue).size() > 1) {
                     // 递归
-                    String v = andCondition((Document) fieldValue, entityClass, fieldMap, t);
+                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, t);
                     buf.append(" " + v);
                 } else {
                     // 递归
-                    String v = andCondition((Document) fieldValue, entityClass, fieldMap, " ");
+                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, " ");
                     buf.append(" " + v);
                 }
             }
@@ -303,20 +305,37 @@ public class ToMySQLUtil {
 
 
     // 执行SQL
-    public static void executeQuery(ApplicationContext applicationContext, String sql) {
+    public static <T> List<T> executeQuery(ApplicationContext applicationContext, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject, String sql) {
         Connection connection = null;
+        List<T> dList = new ArrayList<>();
         try {
             // 获取数据库连接
             connection = getConnection(applicationContext);
 
             PreparedStatement statement = connection.prepareStatement(sql);
-
             // 执行查询
             ResultSet rs = statement.executeQuery();
+
+            ResultSetMetaData metaData = rs.getMetaData();
+            int columnCount = metaData.getColumnCount();
+
+            // 封装结果
             while (rs.next()) {
-                System.out.println(rs);
+                T object = entityClass.newInstance();
+
+                for (int i = 1; i <= columnCount; i++) {
+                    String columnName = metaData.getColumnName(i);
+                    Object columnValue = rs.getObject(i);
+
+                    Map<String, Field> columnMap = fieldMapObject.getColumnMap();
+                    Field field = columnMap.get(columnName);
+
+                    field.set(object, columnValue);
+                    dList.add(object);
+                }
             }
 
+            return dList;
         } catch (Exception ignored) {
 
         } finally {
@@ -328,7 +347,7 @@ public class ToMySQLUtil {
             }
         }
 
-
+        return dList;
     }
 
     // 获取数据库连接
@@ -344,10 +363,47 @@ public class ToMySQLUtil {
 
             }
         }
-
         return connection;
     }
 
 
+    public static class FieldMap {
+        private Map<String/*属性名*/, Field> fieldMap = new HashMap<>();
+        private Map<String/*字段名*/, Field> columnMap = new HashMap<>();
+        private Map<String/*属性名*/, String/*字段名*/> fieldColumnMap = new HashMap<>();
+        private Map<String/*字段名*/, String/*属性名*/> columnFieldMap = new HashMap<>();
+
+        public Map<String, Field> getFieldMap() {
+            return fieldMap;
+        }
+
+        public void setFieldMap(Map<String, Field> fieldMap) {
+            this.fieldMap = fieldMap;
+        }
+
+        public Map<String, Field> getColumnMap() {
+            return columnMap;
+        }
+
+        public void setColumnMap(Map<String, Field> columnMap) {
+            this.columnMap = columnMap;
+        }
+
+        public Map<String, String> getFieldColumnMap() {
+            return fieldColumnMap;
+        }
+
+        public void setFieldColumnMap(Map<String, String> fieldColumnMap) {
+            this.fieldColumnMap = fieldColumnMap;
+        }
+
+        public Map<String, String> getColumnFieldMap() {
+            return columnFieldMap;
+        }
+
+        public void setColumnFieldMap(Map<String, String> columnFieldMap) {
+            this.columnFieldMap = columnFieldMap;
+        }
+    }
 
 }
