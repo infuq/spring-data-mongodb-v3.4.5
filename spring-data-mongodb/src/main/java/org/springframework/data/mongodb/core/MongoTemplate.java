@@ -860,10 +860,10 @@ public class MongoTemplate implements MongoOperations, ApplicationContextAware, 
 		Assert.notNull(collectionName, "CollectionName must not be null!");
 		Assert.notNull(entityClass, "EntityClass must not be null!");
 
-		// 表明查询需要转向MySQL
+		// 查询需要转向MySQL
 		if (entityClass.getAnnotation(ToMySQL.class) != null) {
 			// #1
-			ToMySQLUtil.FieldMap fieldMapObject = ToMySQLUtil.buildFieldMap(entityClass);
+			ToMySQLUtil.FieldMapObject fieldMapObject = ToMySQLUtil.buildFieldMap(entityClass);
 
 			// #2
 			String sql = ToMySQLUtil.createSQL(collectionName, query, entityClass, fieldMapObject);
@@ -872,10 +872,13 @@ public class MongoTemplate implements MongoOperations, ApplicationContextAware, 
 			// #3
 			List<T> dList = ToMySQLUtil.executeQuery(applicationContext, entityClass, fieldMapObject, sql);
             System.out.println("查询结果: " + JSON.toJSONString(dList));
-		}
 
-		return doFind(collectionName, query.getQueryObject(), query.getFieldsObject(), entityClass,
-				new QueryCursorPreparer(query, entityClass));
+			return dList;
+		} else {
+
+			return doFind(collectionName, query.getQueryObject(), query.getFieldsObject(), entityClass,
+					new QueryCursorPreparer(query, entityClass));
+		}
 	}
 
 

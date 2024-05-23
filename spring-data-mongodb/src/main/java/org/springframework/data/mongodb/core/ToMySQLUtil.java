@@ -27,15 +27,20 @@ public class ToMySQLUtil {
 
 
     // 构造属性与Field的对应关系
-    public static <T> FieldMap buildFieldMap(Class<T> entityClass) {
+    public static <T> FieldMapObject buildFieldMap(Class<T> entityClass) {
         Field[] fields = entityClass.getDeclaredFields();
 
-        FieldMap fieldMapObject = new FieldMap();
+        FieldMapObject fieldMapObject = new FieldMapObject();
 
         Map<String/*属性名*/, Field> fieldMap = new HashMap<>();
         Map<String/*字段名*/, Field> columnMap = new HashMap<>();
         Map<String/*属性名*/, String/*字段名*/> fieldColumnMap = new HashMap<>();
         Map<String/*字段名*/, String/*属性名*/> columnFieldMap = new HashMap<>();
+
+        fieldMapObject.setFieldMap(fieldMap);
+        fieldMapObject.setColumnMap(columnMap);
+        fieldMapObject.setFieldColumnMap(fieldColumnMap);
+        fieldMapObject.setColumnFieldMap(columnFieldMap);
 
         for (Field f : fields) {
             // 例如 propertyName = createTime
@@ -67,7 +72,7 @@ public class ToMySQLUtil {
     }
 
     // 生成SQL语句
-    public static <T> String createSQL(String collectionName, Query query, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject) {
+    public static <T> String createSQL(String collectionName, Query query, Class<T> entityClass, FieldMapObject fieldMapObject) {
 
         StringBuilder buf = new StringBuilder();
         buf.append("SELECT * FROM ");
@@ -133,13 +138,20 @@ public class ToMySQLUtil {
     }
 
     // 数据库列名
-    private static <T> String findColumnName(String fieldName, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject) {
+    private static <T> String findColumnName(String fieldName, Class<T> entityClass, FieldMapObject fieldMapObject) {
         Map<String, String> fieldColumnMap = fieldMapObject.getFieldColumnMap();
-        return fieldColumnMap.get(fieldName);
+        String columnName = fieldColumnMap.get(fieldName);
+
+        if (columnName == null || columnName.isEmpty()) {
+            columnName = CaseFormat.LOWER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, fieldName);
+            fieldColumnMap.put(fieldName, columnName);
+        }
+
+        return columnName;
     }
 
     // ORDER BY ...
-    private static <T> String orderByCondition(Document document, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMap) {
+    private static <T> String orderByCondition(Document document, Class<T> entityClass, FieldMapObject fieldMap) {
         StringBuilder buf = new StringBuilder();
         for (Map.Entry<String, Object> pair : document.entrySet()) {
             String fieldNameKey = pair.getKey();
@@ -164,7 +176,7 @@ public class ToMySQLUtil {
     }
 
     // AND ... AND .. IN (...) AND .. >= . AND ...
-    private static <T> String andCondition(Document document, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject, String prefixAnd) {
+    private static <T> String andCondition(Document document, Class<T> entityClass, FieldMapObject fieldMapObject, String prefixAnd) {
         StringBuilder buf = new StringBuilder();
 
         int size = document.size();
@@ -179,6 +191,8 @@ public class ToMySQLUtil {
             String fieldNameKey = pair.getKey();
             Object fieldValue = pair.getValue();
             String t;
+
+            String columnName = findColumnName(fieldNameKey, entityClass, fieldMapObject);
 
             // 处理Key
             if (fieldNameKey.startsWith("$")) {
@@ -210,6 +224,9 @@ public class ToMySQLUtil {
                         buf.append(t);
                     }
                 } else if (fieldNameKey.equals("$exists")) {
+                    // 暂时不支持
+                    continue;
+                    /*
                     if ((Boolean) fieldValue) { // 存在
                         t = " IS NOT NULL ";
                         buf.append(t);
@@ -219,19 +236,23 @@ public class ToMySQLUtil {
                         buf.append(t);
                         continue;
                     }
+                    */
                 } else {
-                    t = " " + findColumnName(fieldNameKey, entityClass, fieldMapObject);
+                    t = " " + columnName;
                     buf.append(t);
                 }
             } else {
-                t = " AND " + findColumnName(fieldNameKey, entityClass, fieldMapObject);
-                buf.append(t);
+                if (fieldValue == null) {
+                    t = " AND ( " + columnName + " IS NULL OR " + columnName + " = '' )";
+                    buf.append(t);
+                    continue;
+                } else {
+                    t = " AND " + columnName;
+                    buf.append(t);
+                }
             }
 
-            if (fieldValue == null) {
-                buf.append(" IS NULL ");
-                continue;
-            }
+
 
             // 处理value
             if (fieldValue instanceof String) {                     // 字符类型
@@ -289,7 +310,7 @@ public class ToMySQLUtil {
         for (int i = 0; i < vList.size(); i++) {
             Object v = vList.get(i);
             if (v instanceof String) {
-                inBuf.append("\"" + v + "\"");
+                inBuf.append("'" + v + "'");
             } else {
                 inBuf.append(v);
             }
@@ -305,21 +326,21 @@ public class ToMySQLUtil {
 
 
     // 执行SQL
-    public static <T> List<T> executeQuery(ApplicationContext applicationContext, Class<T> entityClass, ToMySQLUtil.FieldMap fieldMapObject, String sql) {
+    public static <T> List<T> executeQuery(ApplicationContext applicationContext, Class<T> entityClass, FieldMapObject fieldMapObject, String sql) {
         Connection connection = null;
         List<T> dList = new ArrayList<>();
         try {
-            // 获取数据库连接
+            // 1.获取数据库连接
             connection = getConnection(applicationContext);
 
             PreparedStatement statement = connection.prepareStatement(sql);
-            // 执行查询
+            // 2.执行查询
             ResultSet rs = statement.executeQuery();
 
             ResultSetMetaData metaData = rs.getMetaData();
             int columnCount = metaData.getColumnCount();
 
-            // 封装结果
+            // 3.封装结果
             while (rs.next()) {
                 T object = entityClass.newInstance();
 
@@ -329,10 +350,12 @@ public class ToMySQLUtil {
 
                     Map<String, Field> columnMap = fieldMapObject.getColumnMap();
                     Field field = columnMap.get(columnName);
-
-                    field.set(object, columnValue);
-                    dList.add(object);
+                    if (field != null) {
+                        field.setAccessible(true);
+                        field.set(object, columnValue);
+                    }
                 }
+                dList.add(object);
             }
 
             return dList;
@@ -367,7 +390,7 @@ public class ToMySQLUtil {
     }
 
 
-    public static class FieldMap {
+    public static class FieldMapObject {
         private Map<String/*属性名*/, Field> fieldMap = new HashMap<>();
         private Map<String/*字段名*/, Field> columnMap = new HashMap<>();
         private Map<String/*属性名*/, String/*字段名*/> fieldColumnMap = new HashMap<>();
