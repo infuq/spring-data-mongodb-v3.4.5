@@ -46,14 +46,14 @@ public class ToMySQLUtil {
             // 字段名
             String columnName = null;
             ToMySQLTableColumn fieldAnnotation = field.getAnnotation(ToMySQLTableColumn.class);
-            if (fieldAnnotation != null && !StringUtils.isEmpty(fieldAnnotation.value())) {
+            if (fieldAnnotation != null && !isEmpty(fieldAnnotation.value())) {
                 // 字段名称 例如 create_time
                 columnName = fieldAnnotation.value();
                 columnName = columnName.replaceAll("`", "");
                 columnMap.put(columnName, field);
             }
 
-            if (StringUtils.isEmpty(columnName)) {
+            if (isEmpty(columnName)) {
                 // 例如 将 createTime 转成 create_time
                 columnName = CaseFormat.LOWER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, fieldName);
                 columnMap.put(columnName, field);
@@ -83,7 +83,7 @@ public class ToMySQLUtil {
         System.out.println(serializeToJsonSafely(queryObject));
 
         // #1
-        String andCondition = andCondition(queryObject, entityClass, fieldMapObject, " ", " ");
+        String andCondition = andCondition(queryObject, entityClass, fieldMapObject, "", "");
         buf.append(andCondition);
 
         if (query.isSorted()) {
@@ -118,14 +118,14 @@ public class ToMySQLUtil {
         if (entityClassAnnotation != null) {
             // 表
             String table = entityClassAnnotation.table();
-            if (!StringUtils.isEmpty(table)) {
+            if (!isEmpty(table)) {
                 table = table.replaceAll("`", "");
                 // `t_order`
                 tableName = "`" + table + "`";
             }
             // 库
             String database = entityClassAnnotation.database();
-            if (!StringUtils.isEmpty(database)) {
+            if (!isEmpty(database)) {
                 database = database.replaceAll("`", "");
                 // `database`.`t_order`
                 tableName = "`" + database + "`." + tableName;
@@ -140,7 +140,7 @@ public class ToMySQLUtil {
         Map<String, String> fieldColumnMap = fieldMapObject.getFieldColumnMap();
         String columnName = fieldColumnMap.get(fieldName);
 
-        if (StringUtils.isEmpty(columnName)) {
+        if (isEmpty(columnName)) {
             columnName = CaseFormat.LOWER_CAMEL.to(CaseFormat.LOWER_UNDERSCORE, fieldName);
             if (!columnName.contains("$")) {
                 fieldColumnMap.put(fieldName, columnName);
@@ -263,7 +263,11 @@ public class ToMySQLUtil {
                 if (fieldNameKey.startsWith("$")) {
                     buf.append(" '" + fieldValue + "' ) ");
                 } else {
-                    buf.append(" = '" + fieldValue + "' ) ");
+                    if (isEmpty((String) fieldValue)) {
+                        buf.append(" = '" + fieldValue + "' OR " + (isEmpty(prefixColumnName) ? columnName : prefixColumnName) + " IS NULL ) ");
+                    } else {
+                        buf.append(" = '" + fieldValue + "' ) ");
+                    }
                 }
             } else if (fieldValue instanceof Integer) {             // 数值类型
                 if (fieldNameKey.startsWith("$")) {
@@ -293,7 +297,7 @@ public class ToMySQLUtil {
                     buf.append(" " + v);
                 } else {
                     // 递归
-                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, columnName, " ");
+                    String v = andCondition((Document) fieldValue, entityClass, fieldMapObject, columnName, "");
                     buf.append(" " + v);
                 }
             }
@@ -399,6 +403,9 @@ public class ToMySQLUtil {
         return connection;
     }
 
+    private static boolean isEmpty(CharSequence value) {
+        return value == null || value.length() == 0;
+    }
 
     public static class FieldMapObject {
         private Map<String/*属性名*/, Field> fieldMap = new HashMap<>();
